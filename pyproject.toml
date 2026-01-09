@@ -1,0 +1,21 @@
+[project]
+name = "gotta-bike-gps-to-slt"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "gpxpy>=1.6.2",
+    "numpy>=2.4.0",
+    "numpy-stl>=3.2.0",
+    "plotly>=5.18.0",
+    "streamlit>=1.52.2",
+    "watchdog>=6.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.14.11",
+    "ty>=0.0.10",
+    "watchdog>=6.0.0",
+]

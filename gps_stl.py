@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""
+GPX to STL Converter
+Converts GPS track files to 3D-printable elevation profile models.
+Similar to the 3D profiles shown on VeloViewer.
+"""
+
+import argparse
+import math
+from dataclasses import dataclass
+import numpy as np
+
+try:
+    import gpxpy
+    import gpxpy.gpx
+except ImportError:
+    print("Installing gpxpy...")
+    import subprocess
+
+    subprocess.check_call(["pip", "install", "gpxpy", "--break-system-packages", "-q"])
+    import gpxpy
+    import gpxpy.gpx
+
+try:
+    from stl import mesh
+except ImportError:
+    print("Installing numpy-stl...")
+    import subprocess
+
+    subprocess.check_call(["pip", "install", "numpy-stl", "--break-system-packages", "-q"])
+    from stl import mesh
+
+
+@dataclass
+class TrackPoint:
+    """A point along the track with distance and elevation."""
+    distance: float  # cumulative distance in meters
+    elevation: float  # elevation in meters
+    lat: float
+    lon: float
+
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the distance between two GPS coordinates in meters."""
+    R = 6371000  # Earth's radius in meters
+
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2) ** 2 + \
+        math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return R * c
+
+
+def parse_gpx(gpx_file: str) -> list[TrackPoint]:
+    """Parse a GPX file and return a list of TrackPoints with cumulative distance."""
+    with open(gpx_file, 'r') as f:
+        gpx = gpxpy.parse(f)
+
+    points = []
+    cumulative_distance = 0.0
+    prev_point = None
+
+    for track in gpx.tracks:
+        for segment in track.segments:
+            for point in segment.points:
+                if point.elevation is None:
+                    continue
+
+                if prev_point is not None:
+                    cumulative_distance += haversine_distance(
+                        prev_point.latitude, prev_point.longitude,
+                        point.latitude, point.longitude
+                    )
+
+                points.append(TrackPoint(
+                    distance=cumulative_distance,
+                    elevation=point.elevation,
+                    lat=point.latitude,
+                    lon=point.longitude
+                ))
+                prev_point = point
+
+    # Also check routes if no tracks
+    if not points:
+        for route in gpx.routes:
+            for point in route.points:
+                if point.elevation is None:
+                    continue
+
+                if prev_point is not None:
+                    cumulative_distance += haversine_distance(
+                        prev_point.latitude, prev_point.longitude,
+                        point.latitude, point.longitude
+                    )
+
+                points.append(TrackPoint(
+                    distance=cumulative_distance,
+                    elevation=point.elevation,
+                    lat=point.latitude,
+                    lon=point.longitude
+                ))
+                prev_point = point
+
+    return points
+
+
+def smooth_elevations(points: list[TrackPoint], window_size: int = 5) -> list[TrackPoint]:
+    """Apply a simple moving average to smooth elevation data."""
+    if len(points) < window_size:
+        return points
+
+    elevations = [p.elevation for p in points]
+    smoothed = []
+
+    for i in range(len(elevations)):
+        start = max(0, i - window_size // 2)
+        end = min(len(elevations), i + window_size // 2 + 1)
+        smoothed.append(sum(elevations[start:end]) / (end - start))
+
+    return [
+        TrackPoint(p.distance, smoothed[i], p.lat, p.lon)
+        for i, p in enumerate(points)
+    ]
+
+
+def resample_points(points: list[TrackPoint], num_points: int = 500) -> list[TrackPoint]:
+    """Resample track to a fixed number of evenly-spaced points."""
+    if len(points) < 2:
+        return points
+
+    total_distance = points[-1].distance
+    if total_distance == 0:
+        return points
+
+    resampled = []
+    point_idx = 0
+
+    for i in range(num_points):
+        target_distance = (i / (num_points - 1)) * total_distance
+
+        # Find surrounding points
+        while point_idx < len(points) - 1 and points[point_idx + 1].distance < target_distance:
+            point_idx += 1
+
+        if point_idx >= len(points) - 1:
+            resampled.append(points[-1])
+            continue
+
+        # Interpolate
+        p1, p2 = points[point_idx], points[point_idx + 1]
+        if p2.distance == p1.distance:
+            t = 0
+        else:
+            t = (target_distance - p1.distance) / (p2.distance - p1.distance)
+
+        resampled.append(TrackPoint(
+            distance=target_distance,
+            elevation=p1.elevation + t * (p2.elevation - p1.elevation),
+            lat=p1.lat + t * (p2.lat - p1.lat),
+            lon=p1.lon + t * (p2.lon - p1.lon)
+        ))
+
+    return resampled
+
+
+def create_elevation_mesh(
+        points: list[TrackPoint],
+        width_mm: float = 150.0,
+        depth_mm: float = 20.0,
+        base_height_mm: float = 5.0,
+        vertical_exaggeration: float = 2.0,
+        min_elevation_height_mm: float = 2.0
+) -> mesh.Mesh:
+    """
+    Create a 3D mesh from track points.
+
+    Args:
+        points: List of TrackPoints
+        width_mm: Total width of the model in mm
+        depth_mm: Depth (thickness) of the model in mm
+        base_height_mm: Height of the flat base in mm
+        vertical_exaggeration: Factor to exaggerate elevation differences
+        min_elevation_height_mm: Minimum height above base for the profile
+
+    Returns:
+        numpy-stl Mesh object
+    """
+    if len(points) < 2:
+        raise ValueError("Need at least 2 points to create a mesh")
+
+    # Normalize distances to width
+    total_distance = points[-1].distance
+    x_coords = np.array([p.distance / total_distance * width_mm for p in points])
+
+    # Normalize elevations
+    elevations = np.array([p.elevation for p in points])
+    min_elev = elevations.min()
+    max_elev = elevations.max()
+    elev_range = max_elev - min_elev
+
+    if elev_range == 0:
+        elev_range = 1  # Avoid division by zero for flat routes
+
+    # Scale elevations to reasonable height with exaggeration
+    max_profile_height = 30.0  # mm, maximum height of the profile part
+    normalized_elevations = (elevations - min_elev) / elev_range
+    z_coords = base_height_mm + min_elevation_height_mm + \
+               normalized_elevations * max_profile_height * vertical_exaggeration / 2.0
+
+    n_points = len(points)
+
+    # Create vertices for the mesh
+    # We need: front face, back face, top face, bottom face, left cap, right cap
+
+    # Front vertices (y = 0): bottom-left to top-left, along profile, top-right to bottom-right
+    # Back vertices (y = depth): same pattern
+
+    vertices = []
+    faces = []
+
+    # Front face vertices (y = 0)
+    front_bottom = [(x, 0, 0) for x in x_coords]
+    front_top = [(x_coords[i], 0, z_coords[i]) for i in range(n_points)]
+
+    # Back face vertices (y = depth)
+    back_bottom = [(x, depth_mm, 0) for x in x_coords]
+    back_top = [(x_coords[i], depth_mm, z_coords[i]) for i in range(n_points)]
+
+    # Build vertex list
+    # 0 to n_points-1: front bottom
+    # n_points to 2*n_points-1: front top
+    # 2*n_points to 3*n_points-1: back bottom
+    # 3*n_points to 4*n_points-1: back top
+
+    vertices.extend(front_bottom)
+    vertices.extend(front_top)
+    vertices.extend(back_bottom)
+    vertices.extend(back_top)
+
+    # Front face triangles
+    for i in range(n_points - 1):
+        # Two triangles per quad
+        faces.append([i, i + 1, i + n_points])  # bottom-left, bottom-right, top-left
+        faces.append([i + 1, i + n_points + 1, i + n_points])  # bottom-right, top-right, top-left
+
+    # Back face triangles (reversed winding for outward normals)
+    offset = 2 * n_points
+    for i in range(n_points - 1):
+        faces.append([offset + i, offset + i + n_points, offset + i + 1])
+        faces.append([offset + i + 1, offset + i + n_points, offset + i + n_points + 1])
+
+    # Top face (profile surface)
+    for i in range(n_points - 1):
+        front_top_idx = n_points + i
+        back_top_idx = 3 * n_points + i
+        faces.append([front_top_idx, back_top_idx, front_top_idx + 1])
+        faces.append([front_top_idx + 1, back_top_idx, back_top_idx + 1])
+
+    # Bottom face
+    for i in range(n_points - 1):
+        front_bottom_idx = i
+        back_bottom_idx = 2 * n_points + i
+        faces.append([front_bottom_idx, front_bottom_idx + 1, back_bottom_idx])
+        faces.append([front_bottom_idx + 1, back_bottom_idx + 1, back_bottom_idx])
+
+    # Left cap (x = 0)
+    faces.append([0, n_points, 2 * n_points])  # front-bottom, front-top, back-bottom
+    faces.append([n_points, 3 * n_points, 2 * n_points])  # front-top, back-top, back-bottom
+
+    # Right cap (x = width)
+    last = n_points - 1
+    faces.append([last, 2 * n_points + last, n_points + last])
+    faces.append([n_points + last, 2 * n_points + last, 3 * n_points + last])
+
+    # Convert to numpy arrays
+    vertices = np.array(vertices, dtype=np.float32)
+    faces = np.array(faces, dtype=np.int32)
+
+    # Create the mesh
+    elevation_mesh = mesh.Mesh(np.zeros(len(faces), dtype=mesh.Mesh.dtype))
+    for i, face in enumerate(faces):
+        for j in range(3):
+            elevation_mesh.vectors[i][j] = vertices[face[j]]
+
+    return elevation_mesh
+
+
+def gpx_to_stl(
+        gpx_file: str,
+        output_file: str = None,
+        width_mm: float = 150.0,
+        depth_mm: float = 20.0,
+        base_height_mm: float = 5.0,
+        vertical_exaggeration: float = 2.0,
+        num_points: int = 500,
+        smooth_window: int = 5
+) -> str:
+    """
+    Convert a GPX file to an STL file.
+
+    Args:
+        gpx_file: Path to input GPX file
+        output_file: Path to output STL file (default: same name as GPX with .stl extension)
+        width_mm: Width of the model in mm
+        depth_mm: Depth of the model in mm
+        base_height_mm: Height of the base in mm
+        vertical_exaggeration: Factor to exaggerate elevation differences
+        num_points: Number of points to resample to
+        smooth_window: Window size for elevation smoothing
+
+    Returns:
+        Path to the created STL file
+    """
+    if output_file is None:
+        output_file = gpx_file.rsplit('.', 1)[0] + '.stl'
+
+    print(f"Parsing GPX file: {gpx_file}")
+    points = parse_gpx(gpx_file)
+
+    if len(points) < 2:
+        raise ValueError("GPX file contains fewer than 2 valid points with elevation data")
+
+    print(f"Found {len(points)} points")
+    print(f"Total distance: {points[-1].distance / 1000:.2f} km")
+
+    elevations = [p.elevation for p in points]
+    print(f"Elevation range: {min(elevations):.0f}m - {max(elevations):.0f}m")
+    print(
+        f"Total elevation gain: {sum(max(0, elevations[i + 1] - elevations[i]) for i in range(len(elevations) - 1)):.0f}m")
+
+    print(f"Smoothing elevations (window={smooth_window})...")
+    points = smooth_elevations(points, smooth_window)
+
+    print(f"Resampling to {num_points} points...")
+    points = resample_points(points, num_points)
+
+    print("Creating 3D mesh...")
+    elevation_mesh = create_elevation_mesh(
+        points,
+        width_mm=width_mm,
+        depth_mm=depth_mm,
+        base_height_mm=base_height_mm,
+        vertical_exaggeration=vertical_exaggeration
+    )
+
+    print(f"Saving STL file: {output_file}")
+    elevation_mesh.save(output_file)
+
+    print(f"\nModel dimensions: {width_mm}mm x {depth_mm}mm")
+    print("Done!")
+
+    return output_file
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert GPX files to 3D-printable STL elevation profiles",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s ride.gpx
+  %(prog)s ride.gpx -o profile.stl --width 200 --exaggeration 3
+  %(prog)s climb.gpx --depth 30 --base 10
+        """
+    )
+
+    parser.add_argument("gpx_file", help="Input GPX file")
+    parser.add_argument("-o", "--output", help="Output STL file (default: <input>.stl)")
+    parser.add_argument("--width", type=float, default=150.0,
+                        help="Width of the model in mm (default: 150)")
+    parser.add_argument("--depth", type=float, default=20.0,
+                        help="Depth of the model in mm (default: 20)")
+    parser.add_argument("--base", type=float, default=5.0,
+                        help="Base height in mm (default: 5)")
+    parser.add_argument("--exaggeration", type=float, default=2.0,
+                        help="Vertical exaggeration factor (default: 2.0)")
+    parser.add_argument("--points", type=int, default=500,
+                        help="Number of points to resample to (default: 500)")
+    parser.add_argument("--smooth", type=int, default=5,
+                        help="Smoothing window size (default: 5)")
+
+    args = parser.parse_args()
+
+    try:
+        gpx_to_stl(
+            args.gpx_file,
+            output_file=args.output,
+            width_mm=args.width,
+            depth_mm=args.depth,
+            base_height_mm=args.base,
+            vertical_exaggeration=args.exaggeration,
+            num_points=args.points,
+            smooth_window=args.smooth
+        )
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())
