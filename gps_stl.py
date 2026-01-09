@@ -486,6 +486,7 @@ def create_map_elevation_mesh(
         vertical_exaggeration: float = 2.0,
         min_elevation_height_mm: float = 2.0,
         ribbon_width_mm: float = 10.0,
+        ribbon_base_width_mm: float = None,
         bevel_height_mm: float = 0.0,
         bevel_text: str = "",
         bevel_text_height_mm: float = 5.0,
@@ -501,7 +502,8 @@ def create_map_elevation_mesh(
         base_height_mm: Height of the flat base in mm
         vertical_exaggeration: Factor to exaggerate elevation differences
         min_elevation_height_mm: Minimum height above base for the profile
-        ribbon_width_mm: Width of the ribbon/path in mm
+        ribbon_width_mm: Width of the ribbon/path at the top in mm
+        ribbon_base_width_mm: Width of the ribbon at the bottom in mm (None = same as top, no taper)
         bevel_height_mm: Height of beveled edge (0 for no bevel)
         bevel_text: Text to emboss on the front bevel
         bevel_text_height_mm: Height of the text
@@ -571,7 +573,9 @@ def create_map_elevation_mesh(
 
     # Calculate perpendicular offsets for ribbon-style mesh
     # For each point, compute the perpendicular direction to the track
-    half_width = ribbon_width_mm / 2
+    # Taper: bottom can be wider than top for a tapered look
+    half_width_top = ribbon_width_mm / 2
+    half_width_bottom = (ribbon_base_width_mm if ribbon_base_width_mm is not None else ribbon_width_mm) / 2
 
     # Calculate track direction vectors
     dx = np.zeros(n_points)
@@ -599,11 +603,16 @@ def create_map_elevation_mesh(
     perp_x = -dy
     perp_y = dx
 
-    # Calculate inner and outer edge coordinates
-    inner_x = x_coords - perp_x * half_width
-    inner_y = y_coords - perp_y * half_width
-    outer_x = x_coords + perp_x * half_width
-    outer_y = y_coords + perp_y * half_width
+    # Calculate inner and outer edge coordinates for bottom (wider) and top (narrower with taper)
+    inner_bottom_x = x_coords - perp_x * half_width_bottom
+    inner_bottom_y = y_coords - perp_y * half_width_bottom
+    outer_bottom_x = x_coords + perp_x * half_width_bottom
+    outer_bottom_y = y_coords + perp_y * half_width_bottom
+
+    inner_top_x = x_coords - perp_x * half_width_top
+    inner_top_y = y_coords - perp_y * half_width_top
+    outer_top_x = x_coords + perp_x * half_width_top
+    outer_top_y = y_coords + perp_y * half_width_top
 
     # Build vertices
     vertices = []
@@ -616,12 +625,12 @@ def create_map_elevation_mesh(
     # 3n to 4n-1: outer top
 
     # Inner edge vertices - ribbon sits on top of base plate
-    inner_bottom = [(inner_x[i], inner_y[i], base_height_mm) for i in range(n_points)]
-    inner_top = [(inner_x[i], inner_y[i], z_coords[i]) for i in range(n_points)]
+    inner_bottom = [(inner_bottom_x[i], inner_bottom_y[i], base_height_mm) for i in range(n_points)]
+    inner_top = [(inner_top_x[i], inner_top_y[i], z_coords[i]) for i in range(n_points)]
 
     # Outer edge vertices
-    outer_bottom = [(outer_x[i], outer_y[i], base_height_mm) for i in range(n_points)]
-    outer_top = [(outer_x[i], outer_y[i], z_coords[i]) for i in range(n_points)]
+    outer_bottom = [(outer_bottom_x[i], outer_bottom_y[i], base_height_mm) for i in range(n_points)]
+    outer_top = [(outer_top_x[i], outer_top_y[i], z_coords[i]) for i in range(n_points)]
 
     vertices.extend(inner_bottom)
     vertices.extend(inner_top)

@@ -41,6 +41,7 @@ uv run ruff check .
 - Base plate with optional 45-degree beveled edges
 - Text embossing on all 4 bevel sides using matplotlib TextPath
 - Perpendicular offset calculation for ribbon width on map layout
+- Taper option: ribbon can be wider at bottom than top (ribbon_base_width_mm parameter)
 
 ### Important Functions in gps_stl.py
 - `create_map_elevation_mesh()` - Main mesh generator for map layout with bevel and text
@@ -59,4 +60,5 @@ When bevel is enabled, the track is scaled to fit within the effective area:
 - Base Height: 6mm, Bevel: 5mm
 - Text: "GOLDEN CO"
 - Vertical Exaggeration: 3x
-- Ribbon Width: 3mm
+- Ribbon Top Width: 2mm
+- Ribbon Base Width: 7mm (tapered look)

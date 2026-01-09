@@ -16,7 +16,7 @@ Convert GPS track files (GPX) into 3D-printable elevation profile models (STL).
   - Embossed text on all 4 bevel sides
 
 - **Model Settings:**
-  - Ribbon width for track thickness
+  - Ribbon top and base width for track thickness (set base wider than top for tapered look)
   - Base height
   - Vertical exaggeration to emphasize elevation changes
   - Resolution and smoothing controls
