@@ -5,6 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.14"
 dependencies = [
     "gpxpy>=1.6.2",
+    "matplotlib>=3.8.0",
     "numpy>=2.4.0",
     "numpy-stl>=3.2.0",
     "plotly>=5.18.0",

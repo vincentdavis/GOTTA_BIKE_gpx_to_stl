@@ -18,6 +18,7 @@ from gps_stl import (
     smooth_elevations,
     resample_points,
     create_elevation_mesh,
+    create_map_elevation_mesh,
 )
 
 
@@ -130,7 +131,7 @@ def create_stl_preview(stl_mesh: mesh.Mesh):
             zaxis_title='Height (mm)',
             aspectmode='data',
             camera=dict(
-                eye=dict(x=1.5, y=1.5, z=0.8)
+                eye=dict(x=1.2, y=1.8, z=1.0)
             )
         ),
         margin=dict(l=0, r=0, t=30, b=0),
@@ -147,7 +148,13 @@ def gpx_bytes_to_stl(
     base_height_mm: float = 5.0,
     vertical_exaggeration: float = 2.0,
     num_points: int = 500,
-    smooth_window: int = 5
+    smooth_window: int = 5,
+    layout: str = "straight",
+    ribbon_width_mm: float = 10.0,
+    bevel_height_mm: float = 0.0,
+    bevel_text: str = "",
+    bevel_text_height_mm: float = 5.0,
+    bevel_text_depth_mm: float = 1.0
 ) -> tuple[mesh.Mesh, dict]:
     """
     Convert GPX bytes to STL mesh.
@@ -173,14 +180,28 @@ def gpx_bytes_to_stl(
     points = smooth_elevations(points, smooth_window)
     points = resample_points(points, num_points)
 
-    # Create mesh
-    stl_mesh = create_elevation_mesh(
-        points,
-        width_mm=width_mm,
-        depth_mm=depth_mm,
-        base_height_mm=base_height_mm,
-        vertical_exaggeration=vertical_exaggeration
-    )
+    # Create mesh based on layout
+    if layout.lower() != "linear":
+        stl_mesh = create_map_elevation_mesh(
+            points,
+            width_mm=width_mm,
+            depth_mm=depth_mm,
+            base_height_mm=base_height_mm,
+            vertical_exaggeration=vertical_exaggeration,
+            ribbon_width_mm=ribbon_width_mm,
+            bevel_height_mm=bevel_height_mm,
+            bevel_text=bevel_text,
+            bevel_text_height_mm=bevel_text_height_mm,
+            bevel_text_depth_mm=bevel_text_depth_mm
+        )
+    else:
+        stl_mesh = create_elevation_mesh(
+            points,
+            width_mm=width_mm,
+            depth_mm=depth_mm,
+            base_height_mm=base_height_mm,
+            vertical_exaggeration=vertical_exaggeration
+        )
 
     return stl_mesh, stats
 
@@ -214,11 +235,26 @@ and download an STL file ready for 3D printing.
 # Sidebar for parameters
 st.sidebar.header("Model Settings")
 
+layout = st.sidebar.radio(
+    "Layout Style",
+    options=["Map", "Linear"],
+    help="Map: follows actual GPS track shape. Linear: straight elevation profile"
+)
+
+ribbon_width_mm = st.sidebar.slider(
+    "Ribbon Width (mm)",
+    min_value=1,
+    max_value=30,
+    value=3,
+    step=1,
+    help="Width of the path ribbon (Map layout only). Reduce for twisty routes with switchbacks."
+)
+
 width_mm = st.sidebar.slider(
     "Width (mm)",
     min_value=50,
-    max_value=300,
-    value=150,
+    max_value=500,
+    value=300,
     step=10,
     help="Total width of the 3D model"
 )
@@ -226,9 +262,9 @@ width_mm = st.sidebar.slider(
 depth_mm = st.sidebar.slider(
     "Depth (mm)",
     min_value=10,
-    max_value=50,
-    value=20,
-    step=5,
+    max_value=500,
+    value=300,
+    step=10,
     help="Thickness/depth of the model"
 )
 
@@ -240,6 +276,49 @@ base_height_mm = st.sidebar.slider(
     step=1,
     help="Height of the flat base"
 )
+
+bevel_enabled = st.sidebar.checkbox(
+    "Beveled Edge",
+    value=False,
+    help="Add a beveled (angled) edge around the base plate"
+)
+
+bevel_height_mm = st.sidebar.slider(
+    "Bevel Height (mm)",
+    min_value=1,
+    max_value=10,
+    value=2,
+    step=1,
+    help="Height of the beveled edge (45-degree angle)",
+    disabled=not bevel_enabled
+) if bevel_enabled else 0
+
+bevel_text = st.sidebar.text_input(
+    "Bevel Text",
+    value="",
+    help="Text to emboss on the front bevel (leave empty for none)",
+    disabled=not bevel_enabled
+) if bevel_enabled else ""
+
+bevel_text_height_mm = st.sidebar.slider(
+    "Text Height (mm)",
+    min_value=2,
+    max_value=20,
+    value=5,
+    step=1,
+    help="Height of the embossed text",
+    disabled=not bevel_enabled or not bevel_text
+) if bevel_enabled and bevel_text else 5
+
+bevel_text_depth_mm = st.sidebar.slider(
+    "Text Depth (mm)",
+    min_value=0.5,
+    max_value=3.0,
+    value=1.0,
+    step=0.5,
+    help="How far the text protrudes from the bevel",
+    disabled=not bevel_enabled or not bevel_text
+) if bevel_enabled and bevel_text else 1.0
 
 vertical_exaggeration = st.sidebar.slider(
     "Vertical Exaggeration",
@@ -293,7 +372,13 @@ if uploaded_file is not None:
                 base_height_mm=float(base_height_mm),
                 vertical_exaggeration=float(vertical_exaggeration),
                 num_points=num_points,
-                smooth_window=smooth_window
+                smooth_window=smooth_window,
+                layout=layout.lower(),
+                ribbon_width_mm=float(ribbon_width_mm),
+                bevel_height_mm=float(bevel_height_mm),
+                bevel_text=bevel_text,
+                bevel_text_height_mm=float(bevel_text_height_mm),
+                bevel_text_depth_mm=float(bevel_text_depth_mm)
             )
 
         # Show stats
@@ -311,13 +396,15 @@ if uploaded_file is not None:
 
             st.subheader("Model Dimensions")
             st.write(f"**Size:** {width_mm} x {depth_mm} mm")
+            if layout != "Linear":
+                st.write(f"**Ribbon Width:** {ribbon_width_mm} mm")
             st.write(f"**Points:** {stats['num_points']} original, {num_points} resampled")
 
         with col2:
             st.header("3D Preview")
             with st.spinner("Generating preview..."):
                 fig = create_stl_preview(stl_mesh)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         # Download button
         st.header("Download STL")
@@ -349,6 +436,8 @@ st.markdown("---")
 st.markdown("""
 **Tips for best results:**
 - Use GPX files with elevation data (most cycling apps include this)
+- **Map layout**: Shows the actual route shape - great for winding roads or loops
+- **Linear layout**: Best for viewing elevation profile like a graph
 - Adjust vertical exaggeration to make flat routes more visible
 - Higher resolution gives more detail but larger file sizes
 - Smoothing helps reduce noise in GPS elevation data
