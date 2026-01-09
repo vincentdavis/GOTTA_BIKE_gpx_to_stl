@@ -12,6 +12,9 @@ import numpy as np
 import streamlit as st
 from stl import mesh
 
+# Default example file
+EXAMPLE_GPX_PATH = Path(__file__).parent / "examples" / "golden_colorado.gpx"
+
 from gps_stl import (
     TrackPoint,
     haversine_distance,
@@ -254,7 +257,7 @@ width_mm = st.sidebar.slider(
     "Width (mm)",
     min_value=50,
     max_value=500,
-    value=300,
+    value=170,
     step=10,
     help="Total width of the 3D model"
 )
@@ -272,14 +275,14 @@ base_height_mm = st.sidebar.slider(
     "Base Height (mm)",
     min_value=2,
     max_value=20,
-    value=5,
+    value=6,
     step=1,
     help="Height of the flat base"
 )
 
 bevel_enabled = st.sidebar.checkbox(
     "Beveled Edge",
-    value=False,
+    value=True,
     help="Add a beveled (angled) edge around the base plate"
 )
 
@@ -287,7 +290,7 @@ bevel_height_mm = st.sidebar.slider(
     "Bevel Height (mm)",
     min_value=1,
     max_value=10,
-    value=2,
+    value=5,
     step=1,
     help="Height of the beveled edge (45-degree angle)",
     disabled=not bevel_enabled
@@ -295,7 +298,7 @@ bevel_height_mm = st.sidebar.slider(
 
 bevel_text = st.sidebar.text_input(
     "Bevel Text",
-    value="",
+    value="GOLDEN CO",
     help="Text to emboss on the front bevel (leave empty for none)",
     disabled=not bevel_enabled
 ) if bevel_enabled else ""
@@ -314,17 +317,17 @@ bevel_text_depth_mm = st.sidebar.slider(
     "Text Depth (mm)",
     min_value=0.5,
     max_value=3.0,
-    value=1.0,
+    value=2.0,
     step=0.5,
     help="How far the text protrudes from the bevel",
     disabled=not bevel_enabled or not bevel_text
-) if bevel_enabled and bevel_text else 1.0
+) if bevel_enabled and bevel_text else 2.0
 
 vertical_exaggeration = st.sidebar.slider(
     "Vertical Exaggeration",
     min_value=0.5,
     max_value=5.0,
-    value=2.0,
+    value=3.0,
     step=0.5,
     help="Factor to exaggerate elevation differences"
 )
@@ -354,16 +357,36 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.header("Upload GPX File")
-    uploaded_file = st.file_uploader(
-        "Choose a GPX file",
-        type=['gpx'],
-        help="Upload a GPX file from your GPS device or cycling app"
+
+    # Option to load example file
+    use_example = st.checkbox(
+        "Use example file (Golden, CO)",
+        value=True if EXAMPLE_GPX_PATH.exists() else False,
+        help="Load the included example GPX file"
     )
 
-if uploaded_file is not None:
-    try:
-        gpx_bytes = uploaded_file.read()
+    if not use_example:
+        uploaded_file = st.file_uploader(
+            "Choose a GPX file",
+            type=['gpx'],
+            help="Upload a GPX file from your GPS device or cycling app"
+        )
+    else:
+        uploaded_file = None
 
+# Determine which file to use
+gpx_bytes = None
+file_name = None
+
+if use_example and EXAMPLE_GPX_PATH.exists():
+    gpx_bytes = EXAMPLE_GPX_PATH.read_bytes()
+    file_name = EXAMPLE_GPX_PATH.name
+elif uploaded_file is not None:
+    gpx_bytes = uploaded_file.read()
+    file_name = uploaded_file.name
+
+if gpx_bytes is not None:
+    try:
         with st.spinner("Processing GPX file..."):
             stl_mesh, stats = gpx_bytes_to_stl(
                 gpx_bytes,
@@ -410,7 +433,7 @@ if uploaded_file is not None:
         st.header("Download STL")
         stl_bytes = mesh_to_bytes(stl_mesh)
 
-        output_filename = uploaded_file.name.rsplit('.', 1)[0] + '.stl'
+        output_filename = file_name.rsplit('.', 1)[0] + '.stl'
 
         st.download_button(
             label="Download STL File",
@@ -429,7 +452,7 @@ if uploaded_file is not None:
 else:
     with col2:
         st.header("3D Preview")
-        st.info("Upload a GPX file to see the 3D preview here.")
+        st.info("Upload a GPX file or use the example to see the 3D preview here.")
 
 # Footer
 st.markdown("---")
