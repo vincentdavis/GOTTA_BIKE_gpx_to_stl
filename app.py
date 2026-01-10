@@ -38,6 +38,18 @@ from gps_stl import (
     create_map_elevation_mesh,
 )
 
+# Import terrain module (optional - only needed for terrain layout)
+try:
+    from terrain import (
+        calculate_bounds_with_buffer,
+        fetch_terrain,
+        create_terrain_mesh,
+        create_terrain_mesh_separate,
+    )
+    TERRAIN_AVAILABLE = True
+except ImportError:
+    TERRAIN_AVAILABLE = False
+
 
 def parse_gpx_from_bytes(gpx_bytes: bytes) -> list[TrackPoint]:
     """Parse GPX file from bytes and return a list of TrackPoints with cumulative distance."""
@@ -118,14 +130,64 @@ def mesh_to_plotly_data(stl_mesh: mesh.Mesh) -> tuple[np.ndarray, np.ndarray, np
     return x, y, z, i, j, k
 
 
-def create_stl_preview(stl_mesh: mesh.Mesh):
-    """Create a 3D preview of the STL mesh using plotly."""
+def create_stl_preview(stl_mesh: mesh.Mesh, route_mesh: mesh.Mesh = None):
+    """Create a 3D preview of the STL mesh using plotly.
+
+    Args:
+        stl_mesh: Main mesh (or terrain mesh if route_mesh provided)
+        route_mesh: Optional separate route mesh to render in different color
+    """
     import plotly.graph_objects as go
 
     x, y, z, i, j, k = mesh_to_plotly_data(stl_mesh)
 
-    fig = go.Figure(data=[
-        go.Mesh3d(
+    traces = []
+
+    if route_mesh is not None:
+        # Terrain mode: shade based on elevation (z-axis)
+        traces.append(go.Mesh3d(
+            x=x, y=y, z=z,
+            i=i, j=j, k=k,
+            intensity=z,  # Color by elevation
+            colorscale='Earth',  # Terrain-appropriate colorscale
+            showscale=True,
+            colorbar=dict(
+                title='Elevation',
+                thickness=15,
+                len=0.5
+            ),
+            opacity=1.0,
+            flatshading=True,
+            lighting=dict(
+                ambient=0.4,
+                diffuse=0.8,
+                specular=0.3,
+                roughness=0.5
+            ),
+            lightposition=dict(x=100, y=200, z=300),
+            name='Terrain'
+        ))
+
+        # Add route mesh in a contrasting color
+        rx, ry, rz, ri, rj, rk = mesh_to_plotly_data(route_mesh)
+        traces.append(go.Mesh3d(
+            x=rx, y=ry, z=rz,
+            i=ri, j=rj, k=rk,
+            color='#FF4500',  # Orange-red for high visibility
+            opacity=1.0,
+            flatshading=True,
+            lighting=dict(
+                ambient=0.6,
+                diffuse=0.8,
+                specular=0.5,
+                roughness=0.3
+            ),
+            lightposition=dict(x=100, y=200, z=300),
+            name='Route'
+        ))
+    else:
+        # Non-terrain mode: solid color
+        traces.append(go.Mesh3d(
             x=x, y=y, z=z,
             i=i, j=j, k=k,
             color='lightblue',
@@ -137,9 +199,11 @@ def create_stl_preview(stl_mesh: mesh.Mesh):
                 specular=0.3,
                 roughness=0.5
             ),
-            lightposition=dict(x=100, y=200, z=300)
-        )
-    ])
+            lightposition=dict(x=100, y=200, z=300),
+            name='Model'
+        ))
+
+    fig = go.Figure(data=traces)
 
     fig.update_layout(
         scene=dict(
@@ -152,7 +216,8 @@ def create_stl_preview(stl_mesh: mesh.Mesh):
             )
         ),
         margin=dict(l=0, r=0, t=30, b=0),
-        height=500
+        height=500,
+        showlegend=route_mesh is not None
     )
 
     return fig
@@ -172,13 +237,19 @@ def gpx_bytes_to_stl(
     bevel_height_mm: float = 0.0,
     bevel_text: str = "",
     bevel_text_height_mm: float = 5.0,
-    bevel_text_depth_mm: float = 1.0
-) -> tuple[mesh.Mesh, dict]:
+    bevel_text_depth_mm: float = 1.0,
+    terrain_buffer_m: float = 500.0,
+    terrain_resolution_m: float = 30.0,
+    terrain_source: str = "auto",
+    route_width_mm: float = 1.5,
+    route_height_mm: float = 0.5
+) -> tuple[mesh.Mesh, dict, mesh.Mesh | None, mesh.Mesh | None]:
     """
     Convert GPX bytes to STL mesh.
 
     Returns:
-        Tuple of (mesh, stats_dict)
+        Tuple of (mesh, stats_dict, terrain_mesh, route_mesh)
+        terrain_mesh and route_mesh are only set for terrain layout (for colored preview)
     """
     points = parse_gpx_from_bytes(gpx_bytes)
 
@@ -198,8 +269,55 @@ def gpx_bytes_to_stl(
     points = smooth_elevations(points, smooth_window)
     points = resample_points(points, num_points)
 
+    route_mesh = None  # Only used for terrain layout preview
+    terrain_mesh = None  # Only used for terrain layout preview
+
     # Create mesh based on layout
-    if layout.lower() != "linear":
+    if layout.lower() == "terrain":
+        if not TERRAIN_AVAILABLE:
+            raise ImportError("Terrain dependencies not installed. Run: pip install py3dep rasterio")
+
+        # Get route coordinates
+        lats = [p.lat for p in points]
+        lons = [p.lon for p in points]
+
+        # Calculate bounds with buffer
+        bounds = calculate_bounds_with_buffer(lats, lons, terrain_buffer_m)
+
+        # Fetch terrain data
+        grid = fetch_terrain(bounds, terrain_resolution_m, terrain_source)
+
+        # Add terrain stats
+        stats['terrain_grid_size'] = f"{grid.shape[0]} x {grid.shape[1]}"
+        stats['terrain_min_elev'] = float(grid.elevations.min())
+        stats['terrain_max_elev'] = float(grid.elevations.max())
+
+        # Create separate meshes for preview (terrain + route in different colors)
+        terrain_mesh, route_mesh = create_terrain_mesh_separate(
+            grid,
+            route_lats=lats,
+            route_lons=lons,
+            width_mm=width_mm,
+            depth_mm=depth_mm,
+            base_height_mm=base_height_mm,
+            vertical_exaggeration=vertical_exaggeration,
+            route_width_mm=route_width_mm,
+            route_height_mm=route_height_mm
+        )
+
+        # Combined mesh for STL export
+        stl_mesh = create_terrain_mesh(
+            grid,
+            route_lats=lats,
+            route_lons=lons,
+            width_mm=width_mm,
+            depth_mm=depth_mm,
+            base_height_mm=base_height_mm,
+            vertical_exaggeration=vertical_exaggeration,
+            route_width_mm=route_width_mm,
+            route_height_mm=route_height_mm
+        )
+    elif layout.lower() == "map":
         stl_mesh = create_map_elevation_mesh(
             points,
             width_mm=width_mm,
@@ -222,7 +340,7 @@ def gpx_bytes_to_stl(
             vertical_exaggeration=vertical_exaggeration
         )
 
-    return stl_mesh, stats
+    return stl_mesh, stats, terrain_mesh, route_mesh
 
 
 def mesh_to_bytes(stl_mesh: mesh.Mesh) -> bytes:
@@ -287,29 +405,93 @@ default_bevel_text = example_settings["bevel_text"] if example_settings else ""
 
 st.sidebar.header("Model Settings")
 
+# Layout options - include Terrain only if available
+layout_options = ["Map", "Linear"]
+layout_help = "Map: follows actual GPS track shape. Linear: straight elevation profile."
+if TERRAIN_AVAILABLE:
+    layout_options.append("Terrain")
+    layout_help += " Terrain: 3D topo map with route overlay."
+
 layout = st.sidebar.radio(
     "Layout Style",
-    options=["Map", "Linear"],
-    help="Map: follows actual GPS track shape. Linear: straight elevation profile"
+    options=layout_options,
+    help=layout_help
 )
 
-ribbon_width_mm = st.sidebar.slider(
-    "Ribbon Top Width (mm)",
-    min_value=1,
-    max_value=30,
-    value=2,
-    step=1,
-    help="Width of the path ribbon at the top (Map layout only). Reduce for twisty routes with switchbacks."
-)
+# Show terrain-specific controls when Terrain layout is selected
+if layout == "Terrain":
+    st.sidebar.subheader("Terrain Options")
 
-ribbon_base_width_mm = st.sidebar.slider(
-    "Ribbon Base Width (mm)",
-    min_value=1,
-    max_value=30,
-    value=7,
-    step=1,
-    help="Width of the path ribbon at the bottom (Map layout only). Set larger than top width for a tapered look."
-)
+    terrain_source = st.sidebar.selectbox(
+        "Data Source",
+        options=["auto", "usgs", "srtm"],
+        format_func=lambda x: {"auto": "Auto (USGS for USA, SRTM elsewhere)", "usgs": "USGS 3DEP (USA only, high res)", "srtm": "SRTM (Global, 30m)"}[x],
+        help="USGS 3DEP provides higher resolution (10-30m) but only covers USA. SRTM works globally."
+    )
+
+    terrain_buffer_m = st.sidebar.slider(
+        "Buffer (meters)",
+        min_value=100,
+        max_value=2000,
+        value=500,
+        step=100,
+        help="Distance around route to include in terrain"
+    )
+
+    terrain_resolution_m = st.sidebar.selectbox(
+        "Resolution",
+        options=[10, 30, 60],
+        index=1,
+        format_func=lambda x: f"{x}m",
+        help="Terrain resolution. Lower = more detail but larger file. 10m only available for USA via USGS."
+    )
+
+    route_width_mm = st.sidebar.slider(
+        "Route Width (mm)",
+        min_value=0.5,
+        max_value=5.0,
+        value=1.5,
+        step=0.5,
+        help="Width of the route line on the terrain"
+    )
+
+    route_height_mm = st.sidebar.slider(
+        "Route Height (mm)",
+        min_value=0.2,
+        max_value=2.0,
+        value=0.5,
+        step=0.1,
+        help="Height of route above terrain surface"
+    )
+
+    # Set ribbon values to defaults (not used in terrain mode)
+    ribbon_width_mm = 2
+    ribbon_base_width_mm = 7
+else:
+    # Set terrain values to defaults
+    terrain_source = "auto"
+    terrain_buffer_m = 500
+    terrain_resolution_m = 30
+    route_width_mm = 1.5
+    route_height_mm = 0.5
+
+    ribbon_width_mm = st.sidebar.slider(
+        "Ribbon Top Width (mm)",
+        min_value=1,
+        max_value=30,
+        value=2,
+        step=1,
+        help="Width of the path ribbon at the top (Map layout only). Reduce for twisty routes with switchbacks."
+    )
+
+    ribbon_base_width_mm = st.sidebar.slider(
+        "Ribbon Base Width (mm)",
+        min_value=1,
+        max_value=30,
+        value=7,
+        step=1,
+        help="Width of the path ribbon at the bottom (Map layout only). Set larger than top width for a tapered look."
+    )
 
 width_mm = st.sidebar.slider(
     "Width (mm)",
@@ -428,8 +610,12 @@ col1, col2 = st.columns([1, 1])
 
 if gpx_bytes is not None:
     try:
-        with st.spinner("Processing GPX file..."):
-            stl_mesh, stats = gpx_bytes_to_stl(
+        spinner_text = "Processing GPX file..."
+        if layout == "Terrain":
+            spinner_text = "Processing GPX file and fetching terrain data (this may take a moment)..."
+
+        with st.spinner(spinner_text):
+            stl_mesh, stats, terrain_mesh, route_mesh = gpx_bytes_to_stl(
                 gpx_bytes,
                 width_mm=float(width_mm),
                 depth_mm=float(depth_mm),
@@ -443,7 +629,12 @@ if gpx_bytes is not None:
                 bevel_height_mm=float(bevel_height_mm),
                 bevel_text=bevel_text,
                 bevel_text_height_mm=float(bevel_text_height_mm),
-                bevel_text_depth_mm=float(bevel_text_depth_mm)
+                bevel_text_depth_mm=float(bevel_text_depth_mm),
+                terrain_buffer_m=float(terrain_buffer_m),
+                terrain_resolution_m=float(terrain_resolution_m),
+                terrain_source=terrain_source,
+                route_width_mm=float(route_width_mm),
+                route_height_mm=float(route_height_mm)
             )
 
         # Show stats and download in columns
@@ -452,7 +643,10 @@ if gpx_bytes is not None:
 
             st.subheader("Model Dimensions")
             st.write(f"**Size:** {width_mm} x {depth_mm} mm")
-            if layout != "Linear":
+            if layout == "Terrain":
+                st.write(f"**Terrain Grid:** {stats.get('terrain_grid_size', 'N/A')}")
+                st.write(f"**Route Width:** {route_width_mm} mm")
+            elif layout != "Linear":
                 st.write(f"**Ribbon Width:** {ribbon_width_mm} mm")
             st.write(f"**Points:** {stats['num_points']} original, {num_points} resampled")
 
@@ -465,6 +659,15 @@ if gpx_bytes is not None:
             with stat_col2:
                 st.metric("Elevation Gain", f"{stats['elevation_gain']:.0f} m")
                 st.metric("Max Elevation", f"{stats['max_elevation']:.0f} m")
+
+            # Show terrain stats if available
+            if layout == "Terrain" and 'terrain_min_elev' in stats:
+                st.subheader("Terrain Statistics")
+                tcol1, tcol2 = st.columns(2)
+                with tcol1:
+                    st.metric("Terrain Min", f"{stats['terrain_min_elev']:.0f} m")
+                with tcol2:
+                    st.metric("Terrain Max", f"{stats['terrain_max_elev']:.0f} m")
 
             # Download button
             st.subheader("Download STL")
@@ -483,7 +686,11 @@ if gpx_bytes is not None:
         # 3D Preview below the columns
         st.header("3D Preview")
         with st.spinner("Generating preview..."):
-            fig = create_stl_preview(stl_mesh)
+            # For terrain mode, use separate meshes for colored preview
+            if layout == "Terrain" and terrain_mesh is not None and route_mesh is not None:
+                fig = create_stl_preview(terrain_mesh, route_mesh)
+            else:
+                fig = create_stl_preview(stl_mesh)
             st.plotly_chart(fig, use_container_width=True)
 
     except Exception as e:

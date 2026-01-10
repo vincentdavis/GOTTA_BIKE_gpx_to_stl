@@ -757,7 +757,12 @@ def gpx_to_stl(
         vertical_exaggeration: float = 2.0,
         num_points: int = 500,
         smooth_window: int = 5,
-        layout: str = "straight"
+        layout: str = "straight",
+        terrain_buffer_m: float = 500.0,
+        terrain_resolution_m: float = 30.0,
+        terrain_source: str = "auto",
+        route_width_mm: float = 1.5,
+        route_height_mm: float = 0.5
 ) -> str:
     """
     Convert a GPX file to an STL file.
@@ -771,7 +776,12 @@ def gpx_to_stl(
         vertical_exaggeration: Factor to exaggerate elevation differences
         num_points: Number of points to resample to
         smooth_window: Window size for elevation smoothing
-        layout: "straight" for linear profile, "map" for GPS track shape
+        layout: "straight" for linear profile, "map" for GPS track shape, "terrain" for topo map
+        terrain_buffer_m: Buffer around route for terrain mode (meters)
+        terrain_resolution_m: Terrain data resolution (meters)
+        terrain_source: Terrain data source ("usgs", "srtm", or "auto")
+        route_width_mm: Width of route on terrain (mm)
+        route_height_mm: Height of route above terrain (mm)
 
     Returns:
         Path to the created STL file
@@ -800,7 +810,41 @@ def gpx_to_stl(
     points = resample_points(points, num_points)
 
     print(f"Creating 3D mesh (layout={layout})...")
-    if layout.lower() == "map":
+    if layout.lower() == "terrain":
+        # Import terrain module
+        from terrain import (
+            calculate_bounds_with_buffer,
+            fetch_terrain,
+            create_terrain_mesh
+        )
+
+        # Get route coordinates
+        lats = [p.lat for p in points]
+        lons = [p.lon for p in points]
+
+        # Calculate bounds with buffer
+        print(f"Calculating terrain bounds (buffer={terrain_buffer_m}m)...")
+        bounds = calculate_bounds_with_buffer(lats, lons, terrain_buffer_m)
+
+        # Fetch terrain data
+        print(f"Fetching terrain data (source={terrain_source}, resolution={terrain_resolution_m}m)...")
+        grid = fetch_terrain(bounds, terrain_resolution_m, terrain_source)
+        print(f"Terrain grid: {grid.shape[0]} x {grid.shape[1]} points")
+        print(f"Terrain elevation range: {grid.elevations.min():.0f}m - {grid.elevations.max():.0f}m")
+
+        # Create terrain mesh with route overlay
+        elevation_mesh = create_terrain_mesh(
+            grid,
+            route_lats=lats,
+            route_lons=lons,
+            width_mm=width_mm,
+            depth_mm=depth_mm,
+            base_height_mm=base_height_mm,
+            vertical_exaggeration=vertical_exaggeration,
+            route_width_mm=route_width_mm,
+            route_height_mm=route_height_mm
+        )
+    elif layout.lower() == "map":
         elevation_mesh = create_map_elevation_mesh(
             points,
             width_mm=width_mm,
@@ -836,6 +880,7 @@ Examples:
   %(prog)s ride.gpx
   %(prog)s ride.gpx -o profile.stl --width 200 --exaggeration 3
   %(prog)s climb.gpx --depth 30 --base 10
+  %(prog)s route.gpx --layout terrain --terrain-buffer 1000
         """
     )
 
@@ -853,8 +898,20 @@ Examples:
                         help="Number of points to resample to (default: 500)")
     parser.add_argument("--smooth", type=int, default=5,
                         help="Smoothing window size (default: 5)")
-    parser.add_argument("--layout", choices=["straight", "map"], default="straight",
-                        help="Layout style: 'straight' for linear profile, 'map' for GPS track shape (default: straight)")
+    parser.add_argument("--layout", choices=["straight", "map", "terrain"], default="straight",
+                        help="Layout style: 'straight' for linear, 'map' for GPS track, 'terrain' for topo map (default: straight)")
+
+    # Terrain-specific options
+    parser.add_argument("--terrain-buffer", type=float, default=500.0,
+                        help="Buffer around route for terrain mode in meters (default: 500)")
+    parser.add_argument("--terrain-resolution", type=float, default=30.0,
+                        help="Terrain data resolution in meters (default: 30)")
+    parser.add_argument("--terrain-source", choices=["auto", "usgs", "srtm"], default="auto",
+                        help="Terrain data source (default: auto)")
+    parser.add_argument("--route-width", type=float, default=1.5,
+                        help="Width of route on terrain in mm (default: 1.5)")
+    parser.add_argument("--route-height", type=float, default=0.5,
+                        help="Height of route above terrain in mm (default: 0.5)")
 
     args = parser.parse_args()
 
@@ -868,7 +925,12 @@ Examples:
             vertical_exaggeration=args.exaggeration,
             num_points=args.points,
             smooth_window=args.smooth,
-            layout=args.layout
+            layout=args.layout,
+            terrain_buffer_m=args.terrain_buffer,
+            terrain_resolution_m=args.terrain_resolution,
+            terrain_source=args.terrain_source,
+            route_width_mm=args.route_width,
+            route_height_mm=args.route_height
         )
     except Exception as e:
         print(f"Error: {e}")
